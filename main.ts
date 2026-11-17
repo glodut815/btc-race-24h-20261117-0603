@@ -72,6 +72,37 @@ const TIME_STOP_MIN = 1.003; // sell after 240 bars under +0.3%
 const COOLDOWN_BARS = 20;
 const MAX_SLIPPAGE_BPS = 100;
 
+// ---------------------------------------------------------------------------
+// TUNED CONFIG — why each number is what it is (sweep on THIS race's frozen
+// dev window: 1,440 bars, +0.49% drift, 2.1% max drawdown, jagged).
+//
+//   Push +0.5% / 30 min (TREND_PUSH_MIN): the entry filter that decides
+//     whether a trend is real. Below +0.5% (0.4%, 0.3%) the bot overtrades
+//     and flips to -$5.03 on 4 trades — the threshold sits on a cliff edge,
+//     so it stays at 0.5% even though +0.6% scores the same. A push smaller
+//     than the ~12 bps-per-bar noise is indistinguishable from randomness.
+//   RSI 50-78 (TREND_RSI_LO/HI): 50 keeps the bot out of flat-to-down
+//     momentum (RSI under 50 means sellers still own the tape); 78 caps
+//     entries into already-overbought spikes that revert within minutes.
+//     The bounce mode reuses the 78 cap but drops the floor to 40, because
+//     a washout recovery starts from an oversold RSI by definition.
+//   Trail 1.8% (TRAIL_MIN): the trailing stop's minimum distance, retuned
+//     from v2's 1.2%. At 1.2% the stop sat inside the noise band and exits
+//     fired on random wiggles; at 1.8% (or 2x ATR, whichever is wider) the
+//     stop only fires on a genuine reversal. Looser than 3% gives the win
+//     back to the dumps, so 1.8% is the sweet spot on this window.
+//   TP +4% (TAKE_PROFIT): retuned from v2's +2.5%. The dev window's one
+//     real move ran about +2% peak-to-trough before dumping, so a +2.5% TP
+//     almost never fires and only adds noise; +4% is effectively a
+//     "let the winner run" cap that only triggers on a genuine breakout,
+//     while the EMA-break exit does the real profit-taking (bar 538).
+//   Stake 100% (STAKE_BPS): the edge is small (+$1.56 on one round trip)
+//     and the costs are fixed per trade (~43 bps round trip), so sizing
+//     below full equity shrinks the gain faster than it shrinks the risk.
+//     The bot holds at most one position, so 100% stake is one position,
+//     not leverage — the hard stop still caps the loss at -1.5% of cost.
+// ---------------------------------------------------------------------------
+
 /** One EMA: the closes it has seen until it starts, then its value. */
 interface Ema {
   span: number;
@@ -196,6 +227,12 @@ const series = newSeries();
 let trade: Trade | null = null;
 let cooldown = 0;
 
+/** True when the RSI value exists and sits inside [lo, hi] (inclusive). */
+function rsiInRange(s: Series, lo: number, hi: number): boolean {
+  const rsi = s.rsi.value;
+  return rsi !== null && rsi >= lo && rsi <= hi;
+}
+
 /** Trend entry: a confirmed uptrend with a real 30-minute push behind it. */
 function trendSignal(s: Series): boolean {
   const fast = s.fast.value;
@@ -209,7 +246,7 @@ function trendSignal(s: Series): boolean {
   if (push === null || push < TREND_PUSH_MIN) return false;
   const hour = retOver(s, WASHOUT_BARS);
   if (hour === null || hour < TREND_60MIN_MIN) return false;
-  if (rsi < TREND_RSI_LO || rsi > TREND_RSI_HI) return false;
+  if (!rsiInRange(s, TREND_RSI_LO, TREND_RSI_HI)) return false;
   if (atr / close < MIN_ATR_BPS / 10000) return false;
   return true;
 }
@@ -225,12 +262,34 @@ function bounceSignal(s: Series): boolean {
   const snap = retOver(s, BOUNCE_BARS);
   if (snap === null || snap < BOUNCE_MIN) return false;
   if (!(close > fast)) return false; // price reclaimed the fast average
-  if (rsi < BOUNCE_RSI_MIN || rsi > TREND_RSI_HI) return false;
+  if (!rsiInRange(s, BOUNCE_RSI_MIN, TREND_RSI_HI)) return false;
   return true;
 }
 
 function entrySignal(s: Series): boolean {
   return trendSignal(s) || bounceSignal(s);
+}
+
+/**
+ * Trailing distance as a fraction of price: the wider of the 1.8% floor and
+ * 2x ATR, so the stop breathes with volatility instead of sitting at a
+ * fixed distance that noise can trigger on a calm stretch.
+ */
+function trailingDistance(s: Series, close: number): number {
+  const atr = s.atr.value;
+  return Math.max(TRAIL_MIN, atr !== null && close > 0 ? (TRAIL_ATR * atr) / close : TRAIL_MIN);
+}
+
+/** True when price has fallen off its peak by more than the trailing distance. */
+function trailingStopHit(s: Series, close: number, peak: number): boolean {
+  return close < peak * (1 - trailingDistance(s, close));
+}
+
+/** True when the fast average has crossed back under the slow average. */
+function trendBroken(s: Series): boolean {
+  const fast = s.fast.value;
+  const slow = s.slow.value;
+  return fast !== null && slow !== null && fast < slow;
 }
 
 /** True when the held position must be sold on this bar's close. */
@@ -241,14 +300,10 @@ function exitSignal(state: BarsState, s: Series, held: { qty: bigint; cost: bigi
   if (cost <= 0) return true;
   if (trade !== null && close > trade.peak) trade.peak = close;
   const peak = trade !== null ? trade.peak : close;
-  const atr = s.atr.value;
-  const trail = Math.max(TRAIL_MIN, atr !== null && close > 0 ? (TRAIL_ATR * atr) / close : TRAIL_MIN);
-  if (close < peak * (1 - trail)) return true; // trailing stop
+  if (trailingStopHit(s, close, peak)) return true; // trailing stop
   if (value < cost * HARD_STOP) return true; // hard stop
   if (value > cost * TAKE_PROFIT) return true; // take profit
-  const fast = s.fast.value;
-  const slow = s.slow.value;
-  if (fast !== null && slow !== null && fast < slow) return true; // trend broke
+  if (trendBroken(s)) return true; // trend broke
   if (trade !== null && trade.barsHeld > TIME_STOP_BARS && value < cost * TIME_STOP_MIN) return true; // time stop
   return false;
 }
