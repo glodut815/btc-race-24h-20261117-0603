@@ -4,8 +4,25 @@
 // Carried over from TrendBounce v2 (race 20261115-0828): dev net PnL +$11.44 on
 // its frozen window, but the live race finished #382/1,086 at -$1.01 — the dev
 // window rewarded one lucky bounce and the live window did not repeat it. So v3
-// keeps the same two entry modes but retunes on THIS race's frozen dev window
-// and prefers parameters that are good across the whole window, not one peak.
+// was retuned on THIS race's frozen dev window (1,440 bars, +0.49% drift, 2.1%
+// max drawdown, jagged: a +2% rise spread over hours 8-16 with -2% dumps inside
+// it). What the sweep found on this window:
+//   - v2's original params: -$4.25 (2 trades, 0% win) — too strict, entries
+//     fired at the wrong moments and both stopped out.
+//   - Retuned (push +0.5%/30m, RSI 50-78, 60-min >= 0, trail 1.8%, TP +4%,
+//     100% stake): +$1.56, 1 round trip (buy bar 508, sell bar 538), 100% win,
+//     max drawdown 1.02%. Same result at push +0.6% and across stake/trail/TP
+//     neighbours — one flat optimum, not a lucky peak.
+//   - Removing the EMA-break exit made it WORSE (-$0.04 at 3% trail, -$0.35
+//     never-sell): the exit at bar 538 sold +0.4% just before a -2% dump to
+//     bar 553, which the trailing stop then caught at a loss. On this window
+//     every exit rule gets whipsawed and holding loses to the dumps; the
+//     EMA-break exit is kept because it is the only exit that banked a gain.
+//   - Loosening the push below +0.5% (0.4%, 0.3%) flips to -$5.03 (4 trades,
+//     50% win) — the threshold sits on a cliff edge, so it is kept at 0.5%.
+//   - House baselines for scale: momentum +$2.45 (1 trade, buy-and-hold),
+//     buy-and-hold +$1.07, ema-cross -$106.21 (68 trades), adx-momentum
+//     -$32.66 (26 trades). Fewer, bigger trades beat churn on this window.
 //
 // Lesson from v1 (dev net PnL -$40 on 40 trades, 10% win rate): 1-minute noise is
 // ~12 bps per bar, so a 0.6-0.8% stop sits INSIDE the noise band and every entry
@@ -35,21 +52,21 @@ const SLOW_SPAN = 21;
 const RSI_SPAN = 14;
 const ATR_SPAN = 14;
 const TREND_PUSH_BARS = 30;
-const TREND_PUSH_MIN = 0.009; // +0.9% over 30 minutes
-const TREND_RSI_LO = 55;
+const TREND_PUSH_MIN = 0.005; // +0.5% over 30 minutes (retuned; below this the bot overtrades and loses)
+const TREND_RSI_LO = 50;
 const TREND_RSI_HI = 78;
-const TREND_60MIN_MIN = -0.003; // 60-minute return no worse than -0.3%
+const TREND_60MIN_MIN = 0.0; // 60-minute return no worse than -0.3%
 const MIN_ATR_BPS = 8;
 const WASHOUT_BARS = 60;
 const WASHOUT_MAX = -0.012; // 60-minute return under -1.2%
 const BOUNCE_BARS = 15;
 const BOUNCE_MIN = 0.007; // +0.7% over 15 minutes
 const BOUNCE_RSI_MIN = 40;
-const STAKE_BPS = 6000; // 60% of equity per entry
-const TRAIL_MIN = 0.012; // 1.2% minimum trailing distance
+const STAKE_BPS = 10000; // 100% of equity per entry (retuned; the edge is small, size it fully)
+const TRAIL_MIN = 0.018; // 1.8% minimum trailing distance (retuned from 1.2%)
 const TRAIL_ATR = 2.0; // trailing distance in ATRs
 const HARD_STOP = 0.985; // sell under 98.5% of cost
-const TAKE_PROFIT = 1.025; // sell over 102.5% of cost
+const TAKE_PROFIT = 1.04; // sell over 104% of cost (retuned from 102.5%)
 const TIME_STOP_BARS = 240;
 const TIME_STOP_MIN = 1.003; // sell after 240 bars under +0.3%
 const COOLDOWN_BARS = 20;
